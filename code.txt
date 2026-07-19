@@ -1,0 +1,272 @@
+/ Spiritual Freedom and Economic Prosperity
+             (approach based on Pope Francis' definition of spiritual freedom)
+  SOFTWARE  : SAS 
+ DATA FILE : SAVE.xlsx  -> sheet "clean"
+             Columns: Country | ED | GE | RE | LOGC
+                 Country = country name (74 countries, 2023 cross-section)
+                 ED      = Adult Literacy Rate (education proxy)
+                 GE      = Health and Survival Index (gender equity proxy)
+                 RE      = Government Restrictions Index (religious freedom
+                           proxy - higher value = MORE restrictions)
+                 LOGC    = log(GDP per capita)  -> dependent variable
+
+
+ This script reproduces, step by step, the whole empirical analysis of the
+ paper "Spiritual Freedom and economic prosperity: approach from Pope
+ Francis":
+   1) Import the raw data from Excel.
+   2) Inspect and clean the data (fix variable types, check for missing
+      values).
+   3) Classify each country into one of 4 continents (Africa, America,
+      Asia, Europe), following Appendix 8 of the paper.
+   4) Produce descriptive statistics and a correlation matrix.
+   5) Estimate the linear model:
+            LOGC = b0 + b1*ED - b2*RE + b3*GE + e
+      first on the full sample (74 countries), then separately for each
+      continent, and run basic diagnostics (heteroscedasticity test,
+      robust standard errors, variance inflation factors).
+
+ HOW TO USE THIS SCRIPT
+
+
+ - Every person who wants to replicate the analysis only needs: this file,
+   SAS software, and the data file SAVE.xlsx (all three are in this
+   repository).
+ - Update the file path in the LIBNAME statement (STEP 1) to point to the
+   place where you saved SAVE.xlsx on your own computer.
+ - Run the program in order, from top to bottom. Each PROC step prints its
+   own output; read the comment right above a step to know what to look for
+   in the SAS output/log before moving to the next step.
+
+
+ STEP 1 - CONNECT SAS TO THE EXCEL FILE
+
+ The LIBNAME statement below tells SAS to treat the Excel workbook SAVE.xlsx
+ as if it were a SAS library. Each worksheet in the workbook then becomes a
+ SAS data set: SAVEDATA.<sheet name>. We only need the sheet called "clean".
+
+ IMPORTANT: replace the path below with the actual location of SAVE.xlsx on
+ your machine (Windows example shown; on Mac/Linux use forward slashes, e.g.
+ "/Users/yourname/Documents/SAVE.xlsx").
+
+libname SAVEDATA xlsx "C:\Users\YourName\Documents\SAVE.xlsx";
+run;
+
+/* Quick look at the raw data to confirm the import worked. */
+proc print data=SAVEDATA.clean (obs=10);
+   title "Step 1 check: first 10 rows of the raw 'clean' sheet";
+run;
+
+/* PROC CONTENTS lists every variable together with its TYPE (Char/Num),
+   length and format. This is the single most important diagnostic step:
+   Excel sometimes stores numbers as text, which silently breaks PROC REG
+   later on if we don't catch it now. Look at the "Type" column for
+   ED, GE, RE and LOGC. */
+proc contents data=SAVEDATA.clean;
+   title "Step 1 check: variable types in the raw data";
+run;
+
+
+ STEP 2 - CLEAN THE DATA (fix variable types)
+
+ IF Step 1's PROC CONTENTS showed ED, GE, RE and/or LOGC as CHARACTER
+ variables (this can happen when Excel formats numbers as text), the DATA
+ step below converts them to numeric using the INPUT function, then drops
+ the original character versions and renames the numeric ones back to their
+ original names, so that the rest of the script can refer to ED, GE, RE and
+ LOGC as usual.
+
+ IF Step 1's PROC CONTENTS already showed all four variables as NUMERIC,
+ you can skip this step entirely and go straight to Step 3 - simply comment
+ out (or delete) the DATA step below.
+
+data work.clean;
+   set SAVEDATA.clean;
+
+   /* INPUT() reads the text stored in a character variable and converts it
+      to a number, using the "best32." informat, which lets SAS pick the
+      most appropriate numeric representation automatically. */
+   ED_num   = input(ED,   best32.);
+   GE_num   = input(GE,   best32.);
+   RE_num   = input(RE,   best32.);
+   LOGC_num = input(LOGC, best32.);
+
+   drop ED GE RE LOGC;
+   rename ED_num=ED GE_num=GE RE_num=RE LOGC_num=LOGC;
+run;
+
+/* Confirm the conversion worked: all four variables should now show
+   Type = Num. */
+proc contents data=work.clean;
+   title "Step 2 check: variable types after cleaning";
+run;
+
+/* Check for missing values introduced by the conversion (e.g. blank cells
+   in Excel, or text that could not be converted to a number). The paper
+   notes that 2 country-level values were missing in the original sample;
+   PROC REG will simply drop any row with a missing value from the
+   regression (listwise deletion), so no extra action is required, but it
+   is good practice to see how many rows are affected. */
+proc means data=work.clean n nmiss;
+   var ED GE RE LOGC;
+   title "Step 2 check: missing-value count per variable";
+run;
+
+
+
+ STEP 3 - ADD A CONTINENT VARIABLE
+
+ The paper compares the global model against four regional sub-samples:
+ Africa, America, Asia and Europe (see Appendix 8 for the full list of the
+ 74 countries and their continent). The DATA step below reproduces that
+ classification directly in SAS, so the single SAVE.xlsx file is enough to
+ run every regression in the paper (no separate regional spreadsheets are
+ needed).
+
+data work.clean;
+   set work.clean;
+   length continent $10;
+
+   if country in (
+        "Algeria","Angola","Benin","Botswana","Burkina Faso","Cameroon","Chad",
+        "Cote d'Ivoire","Congo, Dem. Rep. of the","Egypt","Eswatini","Ethiopia",
+        "Gambia","Ghana","Kenya","Lesotho","Liberia","Madagascar","Malawi","Mali",
+        "Mozambique","Namibia","Niger","Nigeria","Rwanda","Senegal","Sierra Leone",
+        "South Africa","Tanzania","Togo","Tunisia","Zambia"
+        ) then continent = "Africa";
+
+   else if country in (
+        "Bolivia","Brazil","Colombia","Costa Rica","Dominican Republic","Ecuador",
+        "El Salvador","Guatemala","Guyana","Honduras","Jamaica","Mexico","Paraguay",
+        "Peru","Suriname","Uruguay"
+        ) then continent = "America";
+
+   else if country in (
+        "Azerbaijan","Bangladesh","Cambodia","China","India","Indonesia","Jordan",
+        "Kyrgyz Republic","Laos","Mongolia","Nepal","Pakistan","Philippines",
+        "Tajikistan","Thailand","Timor-Leste","Vietnam"
+        ) then continent = "Asia";
+
+   else if country in (
+        "Albania","Armenia","Belarus","Bosnia and Herzegovina","Georgia","Moldova",
+        "Montenegro","Serbia","Turkiye","Turkey"
+        ) then continent = "Europe";
+
+   /* NOTE: if your country names use accented characters (e.g. "Cote
+      d'Ivoire" vs "Côte d'Ivoire", or "Turkiye" vs "Türkiye"), make sure the
+      spelling in the IN() lists above exactly matches the spelling used in
+      SAVE.xlsx, otherwise those countries will be left with a missing
+      CONTINENT value. Run the PROC FREQ below to check. */
+run;
+
+/* Confirm every country received a continent, and that the counts match
+   the paper (Africa=32, America=16, Asia=17, Europe=9, total=74). */
+proc freq data=work.clean;
+   tables continent / missing;
+   title "Step 3 check: number of countries per continent";
+run;
+
+
+
+ STEP 4 - DESCRIPTIVE STATISTICS AND CORRELATION MATRIX
+ 
+ PROC MEANS gives the mean, standard deviation, minimum and maximum for each
+ variable (this corresponds to Appendix 1 of the paper). PROC CORR gives the
+ Pearson correlation matrix between all four variables (Appendix 2).
+
+proc means data=work.clean n mean std min max;
+   var ED GE RE LOGC;
+   title "Step 4: descriptive statistics (full sample, 74 countries)";
+run;
+
+proc corr data=work.clean;
+   var ED GE RE LOGC;
+   title "Step 4: correlation matrix (full sample, 74 countries)";
+run;
+
+
+
+ STEP 5 - MAIN REGRESSION MODEL (FULL SAMPLE, 74 COUNTRIES)
+ 
+ Empirical model estimated (from the paper):
+
+        LOGC = b0 + b1*ED - b2*RE + b3*GE + e
+
+ Three versions of the same regression are run, each adding a different
+ diagnostic:
+   (a) VIF     -> Variance Inflation Factors, to check for multicollinearity
+                  among ED, RE and GE (a VIF above ~10 signals a problem).
+   (b) SPEC    -> Ramsey/White-type specification test for heteroscedasticity
+                  and functional-form misspecification.
+   (c) HCC/ACOV-> heteroscedasticity-consistent ("robust"/White) standard
+                  errors, useful to double check the significance of the
+                  coefficients if heteroscedasticity is detected in (b).
+
+proc reg data=work.clean plots(only)=(diagnostics residuals);
+   model LOGC = ED RE GE / vif;
+   title "Step 5a: global model with VIF (multicollinearity check)";
+run;
+quit;
+
+proc reg data=work.clean;
+   model LOGC = ED RE GE / spec;
+   title "Step 5b: global model with specification/heteroscedasticity test";
+run;
+quit;
+
+proc reg data=work.clean;
+   model LOGC = ED RE GE / hcc;
+   title "Step 5c: global model with heteroscedasticity-consistent (robust) standard errors";
+run;
+quit;
+
+
+
+ STEP 6 - REGIONAL REGRESSIONS (AFRICA, AMERICA, ASIA, EUROPE)
+ 
+ Instead of creating one separate data set per continent, we simply reuse
+ the CONTINENT variable created in Step 3 with a WHERE statement to filter
+ each region for its own regression. This keeps the whole analysis inside a
+ single data set and a single script, making it easier to audit and
+ reproduce.
+
+proc reg data=work.clean(where=(continent="Africa"));
+   model LOGC = ED RE GE;
+   title "Step 6a: regression for African countries (n=32)";
+run;
+quit;
+
+proc reg data=work.clean(where=(continent="America"));
+   model LOGC = ED RE GE;
+   title "Step 6b: regression for American countries (n=16)";
+run;
+quit;
+
+proc reg data=work.clean(where=(continent="Asia"));
+   model LOGC = ED RE GE;
+   title "Step 6c: regression for Asian countries (n=17)";
+run;
+quit;
+
+proc reg data=work.clean(where=(continent="Europe"));
+   model LOGC = ED RE GE;
+   title "Step 6d: regression for European countries (n=9)";
+run;
+quit;
+
+
+ END OF SCRIPT
+
+ WHAT TO LOOK AT IN THE OUTPUT
+ 
+ - "Parameter Estimates" table of each PROC REG: coefficients (b1, b2, b3),
+   their p-values (Pr > |t|), and the model R-square, to compare against the
+   equations reported in the paper for each sample.
+ - Step 5a (VIF): all VIFs should be well below 10 - the paper reports no
+   concerning multicollinearity.
+ - Step 5b (SPEC test): a significant p-value would indicate
+   heteroscedasticity or a misspecified functional form.
+ - Step 5c (HCC): compare these robust standard errors/p-values to the
+   plain ones from Step 6's continent-level regressions to see whether the
+   significance of any coefficient changes.
+******************************************************************************/
